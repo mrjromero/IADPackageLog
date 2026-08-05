@@ -1,0 +1,147 @@
+const SHEET_NAME = "IAD_Package_Log";
+const DEPTS_SHEET = "Departments";
+const STATUS_SHEET = "Statuses";
+const RECIPIENTS_SHEET = "Recipients";
+const SENDERS_SHEET = "Senders"; // NEW
+
+// Handle GET requests (Read data)
+function doGet(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  if (e.parameter.action === 'getConfig') {
+    let depts = [], statuses = [], recipients = [], senders = [];
+    
+    // Read Departments
+    const deptSheet = ss.getSheetByName(DEPTS_SHEET);
+    if (deptSheet) {
+      const deptData = deptSheet.getDataRange().getValues();
+      if (deptData.length > 1) depts = deptData.slice(1).map(row => row[0]).filter(String);
+    }
+    
+    // Read Statuses
+    const statusSheet = ss.getSheetByName(STATUS_SHEET);
+    if (statusSheet) {
+      const statusData = statusSheet.getDataRange().getValues();
+      if (statusData.length > 1) statuses = statusData.slice(1).map(row => row[0]).filter(String);
+    }
+
+    // Read Recipients
+    const recSheet = ss.getSheetByName(RECIPIENTS_SHEET);
+    if (recSheet) {
+      const recData = recSheet.getDataRange().getValues();
+      if (recData.length > 1) {
+        recipients = recData.slice(1).map(row => ({ name: row[0], email: row[1] })).filter(r => r.name);
+      }
+    }
+
+    // NEW: Read Senders
+    const senderSheet = ss.getSheetByName(SENDERS_SHEET);
+    if (senderSheet) {
+      const senderData = senderSheet.getDataRange().getValues();
+      if (senderData.length > 1) senders = senderData.slice(1).map(row => row[0]).filter(String);
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({
+      departments: depts, statuses: statuses, recipients: recipients, senders: senders
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // EXISTING: Serve package data
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  const dataRange = sheet.getDataRange().getValues();
+  if (dataRange.length <= 1) return ContentService.createTextOutput("[]").setMimeType(ContentService.MimeType.JSON);
+
+  const headers = dataRange[0];
+  const rows = dataRange.slice(1);
+  
+  let monthsBack = e.parameter.monthsBack || "3";
+  let cutoffDate = null;
+  if (monthsBack !== "all") {
+    cutoffDate = new Date();
+    cutoffDate.setMonth(cutoffDate.getMonth() - parseInt(monthsBack, 10));
+  }
+  
+  const dateIndex = headers.indexOf('Date Received');
+  const idIndex = headers.indexOf('ID');
+  const json = [];
+  
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row[idIndex]) continue;
+    if (cutoffDate && dateIndex !== -1 && row[dateIndex]) {
+      const rowDate = new Date(row[dateIndex]);
+      if (rowDate < cutoffDate) continue; 
+    }
+    let obj = {};
+    headers.forEach((header, j) => obj[header] = row[j]);
+    json.push(obj);
+  }
+  return ContentService.createTextOutput(JSON.stringify(json)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// Handle POST requests (Create, Update, Delete)
+function doPost(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const payload = JSON.parse(e.postData.contents);
+  const action = payload.action; 
+  const data = payload.data;
+  
+  // --- NEW: Handle Config Management (Add/Edit/Delete Lists) ---
+  if (action === 'addConfig') {
+    const configSheet = ss.getSheetByName(data.type);
+    configSheet.appendRow(data.row);
+    return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+  } 
+  else if (action === 'updateConfig') {
+    const configSheet = ss.getSheetByName(data.type);
+    const dataRange = configSheet.getDataRange().getValues();
+    for(let i = 1; i < dataRange.length; i++) {
+      if(dataRange[i][0] === data.oldName) {
+        configSheet.getRange(i + 1, 1, 1, data.row.length).setValues([data.row]);
+        return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+  }
+  else if (action === 'deleteConfig') {
+    const configSheet = ss.getSheetByName(data.type);
+    const dataRange = configSheet.getDataRange().getValues();
+    for(let i = 1; i < dataRange.length; i++) {
+      if(dataRange[i][0] === data.name) {
+        configSheet.deleteRow(i + 1);
+        return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+  }
+
+  // --- EXISTING: Handle Package Log Updates ---
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  const dataRange = sheet.getDataRange().getValues();
+  const headers = dataRange[0];
+  const idIndex = headers.indexOf('ID');
+
+  if (action === 'create') {
+    data.ID = Utilities.getUuid();
+    const newRow = headers.map(header => data[header] || "");
+    sheet.appendRow(newRow);
+    return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+  } 
+  else if (action === 'update') {
+    for (let i = 1; i < dataRange.length; i++) {
+      if (dataRange[i][idIndex] === data.ID) {
+        headers.forEach((header, colIndex) => {
+          if (data[header] !== undefined) sheet.getRange(i + 1, colIndex + 1).setValue(data[header]);
+        });
+        return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+  } 
+  else if (action === 'delete') {
+    for (let i = 1; i < dataRange.length; i++) {
+      if (dataRange[i][idIndex] === data.ID) {
+        sheet.deleteRow(i + 1);
+        return ContentService.createTextOutput(JSON.stringify({ status: "success" })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+  }
+  return ContentService.createTextOutput(JSON.stringify({ status: "error" })).setMimeType(ContentService.MimeType.JSON);
+}
